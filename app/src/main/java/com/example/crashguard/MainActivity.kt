@@ -1,28 +1,35 @@
 package com.example.crashguard
 
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.example.crashguard.ui.theme.CrashGuardTheme
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorManager
-import android.content.Context
-import android.util.Log
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-
-
+import java.io.File
+import java.io.FileWriter
 
 class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
@@ -33,7 +40,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var lastGyroMagnitude = 0.0
 
-    private var isCapturing = false
+    private var isCapturing by mutableStateOf(false)
     private var captureStartTime: Long = 0
     private val captureDuration = 2000 // 2 seconds
 
@@ -41,12 +48,22 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val gyroBuffer = mutableListOf<Double>()
 
     private var impactSeverity by mutableStateOf(0.0)
+    private var recordLabel by mutableStateOf(0)
 
     private var spikeTime: Long = 0
     private var spikeDetected = false
 
     private var suddenStopDetected = false
 
+    fun startManualCapture() {
+        if (isCapturing) return
+        accelBuffer.clear()
+        gyroBuffer.clear()
+        suddenStopDetected = false
+        captureStartTime = System.currentTimeMillis()
+        isCapturing = true
+        Log.d("CrashGuard", "🎙️ Manual 2s capture initiated")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,15 +77,25 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             CrashGuardTheme {
                 CrashScreen(
                     severity = impactSeverity,
+                    currentLabel = recordLabel,
+                    isCapturing = isCapturing,
+                    onLabelChange = { recordLabel = it },
+                    onRecordManual = { startManualCapture() },
                     modifier = Modifier.fillMaxSize()
                 )
             }
         }
-
     }
-    @Composable
-    fun CrashScreen(severity: Double, modifier: Modifier = Modifier) {
 
+    @Composable
+    fun CrashScreen(
+        severity: Double,
+        currentLabel: Int,
+        isCapturing: Boolean,
+        onLabelChange: (Int) -> Unit,
+        onRecordManual: () -> Unit,
+        modifier: Modifier = Modifier
+    ) {
         val status = when {
             severity > 7 -> "Severe Crash"
             severity > 4 -> "Moderate Impact"
@@ -77,18 +104,49 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
 
         Scaffold(modifier = modifier.fillMaxSize()) { padding ->
-            Text(
-                text = """
-                🚗 CrashGuard
-                
-                Impact Severity:
-                ${"%.2f".format(severity)} / 10
-                
-                Status:
-                $status
-            """.trimIndent(),
-                modifier = Modifier.padding(padding)
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = """
+                    🚗 CrashGuard
+                    
+                    Impact Severity:
+                    ${"%.2f".format(severity)} / 10
+                    
+                    Status:
+                    $status
+                    
+                    Active Label: ${if (currentLabel == 1) "1 (Crash)" else "0 (Normal)"}
+                    
+                    State: ${if (isCapturing) "Recording... Please perform activity" else "Ready"}
+                """.trimIndent()
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Button(
+                    onClick = onRecordManual,
+                    enabled = !isCapturing
+                ) {
+                    Text(if (isCapturing) "Recording in progress..." else "Record 2s Sample Now")
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row {
+                    Button(onClick = { onLabelChange(0) }) {
+                        Text("Set Label: Normal")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = { onLabelChange(1) }) {
+                        Text("Set Label: Crash")
+                    }
+                }
+            }
         }
     }
 
@@ -169,13 +227,55 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 Log.d("CrashGuard", "📊 Data Capture Complete")
                 Log.d("CrashGuard", "Accel Samples: ${accelBuffer.size}")
                 Log.d("CrashGuard", "Gyro Samples: ${gyroBuffer.size}")
+
+                val maxAccel = accelBuffer.maxOrNull() ?: 0.0
+                val meanAccel = if (accelBuffer.isNotEmpty()) accelBuffer.average() else 0.0
+                val maxGyro = gyroBuffer.maxOrNull() ?: 0.0
+                val meanGyro = if (gyroBuffer.isNotEmpty()) gyroBuffer.average() else 0.0
+                val suddenStop = suddenStopDetected
+
                 val severity = calculateImpactSeverity()
                 impactSeverity = severity
                 Log.d("CrashGuard", "🔥 Impact Severity Index: $severity / 10")
 
+                logTelemetryToCsv(
+                    maxAccel = maxAccel,
+                    meanAccel = meanAccel,
+                    maxGyro = maxGyro,
+                    meanGyro = meanGyro,
+                    suddenStop = suddenStop,
+                    severity = severity,
+                    label = recordLabel
+                )
             }
         }
 
+    }
+
+    fun logTelemetryToCsv(
+        maxAccel: Double,
+        meanAccel: Double,
+        maxGyro: Double,
+        meanGyro: Double,
+        suddenStop: Boolean,
+        severity: Double,
+        label: Int
+    ) {
+        try {
+            val file = File(filesDir, "crash_telemetry.csv")
+            val isNew = !file.exists()
+            val timestamp = System.currentTimeMillis()
+            val writer = FileWriter(file, true)
+            if (isNew) {
+                writer.append("timestamp,max_accel,mean_accel,max_gyro,mean_gyro,sudden_stop,severity_index,label\n")
+            }
+            writer.append("$timestamp,$maxAccel,$meanAccel,$maxGyro,$meanGyro,$suddenStop,$severity,$label\n")
+            writer.flush()
+            writer.close()
+            Log.d("CrashGuard", "Telemetry logged to ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("CrashGuard", "Failed to write telemetry to CSV", e)
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
