@@ -1,23 +1,36 @@
 package com.example.crashguard
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
+import android.telephony.SmsManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,11 +38,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.example.crashguard.ui.theme.CrashGuardTheme
 import java.io.File
 import java.io.FileWriter
+import java.util.Locale
 
 class MainActivity : ComponentActivity(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
@@ -49,11 +65,20 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var impactSeverity by mutableStateOf(0.0)
     private var recordLabel by mutableStateOf(0)
+    private var emergencyContactNumber by mutableStateOf("YOUR_PHONE_NUMBER_HERE")
 
     private var spikeTime: Long = 0
     private var spikeDetected = false
 
     private var suddenStopDetected = false
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        permissions.entries.forEach { (permission, isGranted) ->
+            Log.d("CrashGuard", "Permission $permission granted: $isGranted")
+        }
+    }
 
     fun startManualCapture() {
         if (isCapturing) return
@@ -65,12 +90,106 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         Log.d("CrashGuard", "🎙️ Manual 2s capture initiated")
     }
 
+    private fun getLastKnownLocation(): Pair<Double, Double>? {
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
+
+        val hasFine = ContextCompat.checkSelfPermission(
+            this,
+            android.Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val hasCoarse = ContextCompat.checkSelfPermission(
+            this,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasFine && !hasCoarse) {
+            Log.w("CrashGuard", "Location permissions not granted.")
+            return null
+        }
+
+        var bestLocation: Location? = null
+        val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+
+        for (provider in providers) {
+            try {
+                if (locationManager.isProviderEnabled(provider)) {
+                    val loc = locationManager.getLastKnownLocation(provider)
+                    if (loc != null) {
+                        if (bestLocation == null || loc.accuracy < bestLocation.accuracy) {
+                            bestLocation = loc
+                        }
+                    }
+                }
+            } catch (e: SecurityException) {
+                Log.e("CrashGuard", "SecurityException getting location from $provider", e)
+            } catch (e: Exception) {
+                Log.e("CrashGuard", "Error getting location from $provider", e)
+            }
+        }
+
+        return bestLocation?.let { Pair(it.latitude, it.longitude) }
+    }
+
+    fun sendEmergencyAlert(severity: Double) {
+        if (emergencyContactNumber.isBlank() || emergencyContactNumber == "YOUR_PHONE_NUMBER_HERE") {
+            Log.w("CrashGuard", "Emergency alert not sent: contact number is not configured.")
+            return
+        }
+
+        val hasSmsPermission = ContextCompat.checkSelfPermission(
+            this,
+            android.Manifest.permission.SEND_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (!hasSmsPermission) {
+            Log.e("CrashGuard", "Cannot send SMS: SEND_SMS permission is not granted.")
+            return
+        }
+
+        val location = getLastKnownLocation()
+        val message = if (location != null) {
+            "EMERGENCY ALERT: Crash detected with severity %.2f/10. Location: https://maps.google.com/?q=%f,%f"
+                .format(Locale.US, severity, location.first, location.second)
+        } else {
+            "EMERGENCY ALERT: Crash detected with severity %.2f/10. Location unavailable."
+                .format(Locale.US, severity)
+        }
+
+        try {
+            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                getSystemService(SmsManager::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                SmsManager.getDefault()
+            }
+
+            val parts = smsManager.divideMessage(message)
+            if (parts.size > 1) {
+                smsManager.sendMultipartTextMessage(emergencyContactNumber, null, parts, null, null)
+            } else {
+                smsManager.sendTextMessage(emergencyContactNumber, null, message, null, null)
+            }
+            Log.d("CrashGuard", "✅ Emergency SMS dispatched to $emergencyContactNumber: $message")
+        } catch (e: Exception) {
+            Log.e("CrashGuard", "❌ Failed to dispatch emergency SMS alert", e)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+        requestPermissionLauncher.launch(
+            arrayOf(
+                android.Manifest.permission.SEND_SMS,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
 
         enableEdgeToEdge()
         setContent {
@@ -79,8 +198,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     severity = impactSeverity,
                     currentLabel = recordLabel,
                     isCapturing = isCapturing,
+                    emergencyContact = emergencyContactNumber,
+                    onEmergencyContactChange = { emergencyContactNumber = it },
                     onLabelChange = { recordLabel = it },
                     onRecordManual = { startManualCapture() },
+                    onTestSms = { sendEmergencyAlert(if (impactSeverity > 0.0) impactSeverity else 8.5) },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -92,8 +214,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         severity: Double,
         currentLabel: Int,
         isCapturing: Boolean,
+        emergencyContact: String,
+        onEmergencyContactChange: (String) -> Unit,
         onLabelChange: (Int) -> Unit,
         onRecordManual: () -> Unit,
+        onTestSms: () -> Unit,
         modifier: Modifier = Modifier
     ) {
         val status = when {
@@ -109,6 +234,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     .fillMaxSize()
                     .padding(padding)
                     .padding(16.dp)
+                    .verticalScroll(rememberScrollState())
             ) {
                 Text(
                     text = """
@@ -130,21 +256,56 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                 Button(
                     onClick = onRecordManual,
-                    enabled = !isCapturing
+                    enabled = !isCapturing,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(if (isCapturing) "Recording in progress..." else "Record 2s Sample Now")
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                Row {
-                    Button(onClick = { onLabelChange(0) }) {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { onLabelChange(0) },
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Text("Set Label: Normal")
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = { onLabelChange(1) }) {
+                    Button(
+                        onClick = { onLabelChange(1) },
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Text("Set Label: Crash")
                     }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Text(
+                    text = "Emergency Dispatch Settings",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = emergencyContact,
+                    onValueChange = onEmergencyContactChange,
+                    label = { Text("Emergency Contact Phone") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = onTestSms,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test Emergency SMS")
                 }
             }
         }
@@ -247,6 +408,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     severity = severity,
                     label = recordLabel
                 )
+
+                if (severity > 7.0) {
+                    Log.d("CrashGuard", "🚨 Severe crash detected ($severity / 10)! Triggering emergency alert...")
+                    sendEmergencyAlert(severity)
+                }
             }
         }
 
