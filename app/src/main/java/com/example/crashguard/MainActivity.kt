@@ -10,12 +10,16 @@ import android.location.Location
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.CountDownTimer
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,6 +33,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -37,10 +43,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.example.crashguard.ui.theme.CrashGuardTheme
 import java.io.File
@@ -66,6 +78,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var impactSeverity by mutableStateOf(0.0)
     private var recordLabel by mutableStateOf(0)
     private var emergencyContactNumber by mutableStateOf("YOUR_PHONE_NUMBER_HERE")
+
+    private var isCountdownActive by mutableStateOf(false)
+    private var countdownSecondsLeft by mutableStateOf(10)
+    private var countdownSeverity by mutableStateOf(0.0)
+    private var emergencyTimer: CountDownTimer? = null
 
     private var spikeTime: Long = 0
     private var spikeDetected = false
@@ -176,6 +193,39 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
+    fun startEmergencyCountdown(severity: Double) {
+        countdownSeverity = severity
+        countdownSecondsLeft = 10
+        isCountdownActive = true
+
+        emergencyTimer?.cancel()
+        emergencyTimer = object : CountDownTimer(10000, 1000) {
+            override fun onTick(millisUntilFinished: Long) {
+                countdownSecondsLeft = kotlin.math.ceil(millisUntilFinished / 1000.0).toInt().coerceAtLeast(1)
+            }
+
+            override fun onFinish() {
+                countdownSecondsLeft = 0
+                isCountdownActive = false
+                Log.d("CrashGuard", "⏰ Emergency countdown finished. Dispatching emergency alert...")
+                sendEmergencyAlert(countdownSeverity)
+            }
+        }.start()
+        Log.d("CrashGuard", "🚨 Emergency countdown started for severity: $severity")
+    }
+
+    fun cancelEmergencyCountdown() {
+        emergencyTimer?.cancel()
+        emergencyTimer = null
+        isCountdownActive = false
+        Log.d("CrashGuard", "Emergency alert cancelled by user (False Alarm).")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        emergencyTimer?.cancel()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -198,10 +248,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     severity = impactSeverity,
                     currentLabel = recordLabel,
                     isCapturing = isCapturing,
+                    isCountdownActive = isCountdownActive,
+                    countdownSecondsLeft = countdownSecondsLeft,
+                    countdownSeverity = countdownSeverity,
                     emergencyContact = emergencyContactNumber,
                     onEmergencyContactChange = { emergencyContactNumber = it },
                     onLabelChange = { recordLabel = it },
                     onRecordManual = { startManualCapture() },
+                    onTestCountdown = { startEmergencyCountdown(if (impactSeverity > 0.0) impactSeverity else 8.5) },
+                    onCancelCountdown = { cancelEmergencyCountdown() },
                     onTestSms = { sendEmergencyAlert(if (impactSeverity > 0.0) impactSeverity else 8.5) },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -214,10 +269,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         severity: Double,
         currentLabel: Int,
         isCapturing: Boolean,
+        isCountdownActive: Boolean,
+        countdownSecondsLeft: Int,
+        countdownSeverity: Double,
         emergencyContact: String,
         onEmergencyContactChange: (String) -> Unit,
         onLabelChange: (Int) -> Unit,
         onRecordManual: () -> Unit,
+        onTestCountdown: () -> Unit,
+        onCancelCountdown: () -> Unit,
         onTestSms: () -> Unit,
         modifier: Modifier = Modifier
     ) {
@@ -226,6 +286,92 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             severity > 4 -> "Moderate Impact"
             severity > 1 -> "Minor Impact"
             else -> "No Crash Detected"
+        }
+
+        if (isCountdownActive) {
+            Dialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFFB71C1C))
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = "⚠️ SEVERE IMPACT DETECTED!",
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text(
+                            text = "Severity: ${"%.2f".format(countdownSeverity)} / 10",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFFD54F)
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.35f)),
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "Sending Emergency Alert in:",
+                                    style = MaterialTheme.typography.bodyLarge.copy(color = Color.White)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "${countdownSecondsLeft}s",
+                                    style = MaterialTheme.typography.displayLarge.copy(
+                                        fontWeight = FontWeight.Black,
+                                        color = Color.White
+                                    )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(32.dp))
+
+                        Button(
+                            onClick = onCancelCountdown,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(64.dp)
+                        ) {
+                            Text(
+                                text = "I'M SAFE (CANCEL ALERT)",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFB71C1C)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Scaffold(modifier = modifier.fillMaxSize()) { padding ->
@@ -299,6 +445,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = onTestCountdown,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test 10s Countdown")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Button(
                     onClick = onTestSms,
@@ -410,8 +566,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 )
 
                 if (severity > 7.0) {
-                    Log.d("CrashGuard", "🚨 Severe crash detected ($severity / 10)! Triggering emergency alert...")
-                    sendEmergencyAlert(severity)
+                    Log.d("CrashGuard", "🚨 Severe crash detected ($severity / 10)! Starting emergency countdown...")
+                    startEmergencyCountdown(severity)
                 }
             }
         }
