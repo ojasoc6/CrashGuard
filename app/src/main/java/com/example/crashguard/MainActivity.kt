@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.CountDownTimer
 import android.telephony.SmsManager
 import android.util.Log
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -39,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,9 +51,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
@@ -83,6 +88,15 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var countdownSecondsLeft by mutableStateOf(10)
     private var countdownSeverity by mutableStateOf(0.0)
     private var emergencyTimer: CountDownTimer? = null
+
+    private var userName by mutableStateOf("User Name")
+    private var bloodGroup by mutableStateOf("O+")
+    private var medicalConditions by mutableStateOf("None / Diabetic / Asthmatic")
+    private var emergencyPin by mutableStateOf("1234")
+    private var isMedicalScreenLocked by mutableStateOf(false)
+    private var enteredPin by mutableStateOf("")
+    private var pinError by mutableStateOf(false)
+    private var showPinDialog by mutableStateOf(false)
 
     private var spikeTime: Long = 0
     private var spikeDetected = false
@@ -209,6 +223,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 isCountdownActive = false
                 Log.d("CrashGuard", "⏰ Emergency countdown finished. Dispatching emergency alert...")
                 sendEmergencyAlert(countdownSeverity)
+                isMedicalScreenLocked = true
             }
         }.start()
         Log.d("CrashGuard", "🚨 Emergency countdown started for severity: $severity")
@@ -228,6 +243,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -252,7 +279,33 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     countdownSecondsLeft = countdownSecondsLeft,
                     countdownSeverity = countdownSeverity,
                     emergencyContact = emergencyContactNumber,
+                    userName = userName,
+                    bloodGroup = bloodGroup,
+                    medicalConditions = medicalConditions,
+                    emergencyPin = emergencyPin,
+                    isMedicalScreenLocked = isMedicalScreenLocked,
+                    enteredPin = enteredPin,
+                    pinError = pinError,
+                    showPinDialog = showPinDialog,
                     onEmergencyContactChange = { emergencyContactNumber = it },
+                    onUserNameChange = { userName = it },
+                    onBloodGroupChange = { bloodGroup = it },
+                    onMedicalConditionsChange = { medicalConditions = it },
+                    onEmergencyPinChange = { emergencyPin = it },
+                    onEnteredPinChange = { enteredPin = it; pinError = false },
+                    onShowPinDialogChange = { showPinDialog = it; if (!it) { enteredPin = ""; pinError = false } },
+                    onUnlockMedicalScreen = {
+                        if (enteredPin == emergencyPin) {
+                            isMedicalScreenLocked = false
+                            showPinDialog = false
+                            enteredPin = ""
+                            pinError = false
+                            Log.d("CrashGuard", "🔓 Medical screen unlocked by PIN.")
+                        } else {
+                            pinError = true
+                        }
+                    },
+                    onLockMedicalScreen = { isMedicalScreenLocked = true },
                     onLabelChange = { recordLabel = it },
                     onRecordManual = { startManualCapture() },
                     onTestCountdown = { startEmergencyCountdown(if (impactSeverity > 0.0) impactSeverity else 8.5) },
@@ -273,7 +326,23 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         countdownSecondsLeft: Int,
         countdownSeverity: Double,
         emergencyContact: String,
+        userName: String,
+        bloodGroup: String,
+        medicalConditions: String,
+        emergencyPin: String,
+        isMedicalScreenLocked: Boolean,
+        enteredPin: String,
+        pinError: Boolean,
+        showPinDialog: Boolean,
         onEmergencyContactChange: (String) -> Unit,
+        onUserNameChange: (String) -> Unit,
+        onBloodGroupChange: (String) -> Unit,
+        onMedicalConditionsChange: (String) -> Unit,
+        onEmergencyPinChange: (String) -> Unit,
+        onEnteredPinChange: (String) -> Unit,
+        onShowPinDialogChange: (Boolean) -> Unit,
+        onUnlockMedicalScreen: () -> Unit,
+        onLockMedicalScreen: () -> Unit,
         onLabelChange: (Int) -> Unit,
         onRecordManual: () -> Unit,
         onTestCountdown: () -> Unit,
@@ -374,6 +443,200 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             }
         }
 
+        if (isMedicalScreenLocked) {
+            Dialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFF0D1B2A))
+                        .padding(20.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        Text(
+                            text = "⚕️ FIRST RESPONDER INFO",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                color = Color(0xFFFF5252),
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 2.sp
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = "EMERGENCY MEDICAL PROFILE",
+                            style = MaterialTheme.typography.headlineSmall.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1B263B)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text(
+                                    text = "FULL NAME",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF778DA9))
+                                )
+                                Text(
+                                    text = userName.ifBlank { "Not Specified" },
+                                    style = MaterialTheme.typography.titleLarge.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Text(
+                                    text = "BLOOD GROUP",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF778DA9))
+                                )
+                                Text(
+                                    text = bloodGroup.ifBlank { "Unknown" },
+                                    style = MaterialTheme.typography.headlineMedium.copy(
+                                        fontWeight = FontWeight.Black,
+                                        color = Color(0xFFFF5252)
+                                    )
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Text(
+                                    text = "CONDITIONS & ALLERGIES",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF778DA9))
+                                )
+                                Text(
+                                    text = medicalConditions.ifBlank { "None Reported" },
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color.White
+                                    )
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Text(
+                                    text = "EMERGENCY CONTACT",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF778DA9))
+                                )
+                                Text(
+                                    text = emergencyContact.ifBlank { "None Configured" },
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF64DFDF)
+                                    )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        Button(
+                            onClick = { onShowPinDialogChange(true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF415A77)),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                        ) {
+                            Text(
+                                text = "🔒 Unlock / Dismiss",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(24.dp))
+                    }
+                }
+            }
+
+            if (showPinDialog) {
+                Dialog(
+                    onDismissRequest = { onShowPinDialogChange(false) }
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Enter 4-Digit PIN to Unlock",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            OutlinedTextField(
+                                value = enteredPin,
+                                onValueChange = onEnteredPinChange,
+                                label = { Text("4-Digit PIN") },
+                                singleLine = true,
+                                isError = pinError,
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            if (pinError) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Incorrect PIN. Please try again.",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(onClick = { onShowPinDialogChange(false) }) {
+                                    Text("Cancel")
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Button(onClick = onUnlockMedicalScreen) {
+                                    Text("Unlock")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Scaffold(modifier = modifier.fillMaxSize()) { padding ->
             Column(
                 modifier = Modifier
@@ -462,6 +725,68 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Test Emergency SMS")
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Text(
+                    text = "Emergency Medical Profile (Responder ID)",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = userName,
+                    onValueChange = onUserNameChange,
+                    label = { Text("Full Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = bloodGroup,
+                    onValueChange = onBloodGroupChange,
+                    label = { Text("Blood Group (e.g. O+, A-, B+)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = medicalConditions,
+                    onValueChange = onMedicalConditionsChange,
+                    label = { Text("Medical Conditions & Allergies") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = emergencyPin,
+                    onValueChange = {
+                        if (it.length <= 4 && it.all { c -> c.isDigit() }) {
+                            onEmergencyPinChange(it)
+                        }
+                    },
+                    label = { Text("Dismiss PIN (4 Digits)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Button(
+                    onClick = onLockMedicalScreen,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00695C)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Test Medical Lock Screen")
                 }
             }
         }
